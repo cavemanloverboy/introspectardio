@@ -12,8 +12,6 @@ use solana_system_interface::instruction::create_account;
 const PROGRAM_ID: Pubkey = Pubkey::new_from_array([5; 32]);
 const TOKEN_PROGRAM: Pubkey = solana_sdk::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
-const POOL_LEN: usize = 216;
-
 #[test]
 fn integration() {
     let mut svm = LiteSVM::new()
@@ -26,7 +24,6 @@ fn integration() {
         .unwrap();
 
     let payer = Pubkey::new_unique();
-    let pool = Pubkey::new_unique();
     let user = Pubkey::new_unique();
 
     let mint_a = Pubkey::new_unique(); // SOL-wrapped (decimals=9)
@@ -36,8 +33,10 @@ fn integration() {
     svm.airdrop(&user, 100 * LAMPORTS_PER_SOL).unwrap();
 
     // derive vault PDAs (seeds: pool_key, mint_key)
+    let (pool, _) = Pubkey::find_program_address(&[mint_a.as_ref(), mint_b.as_ref()], &PROGRAM_ID);
     let (vault_a, _) = Pubkey::find_program_address(&[pool.as_ref(), mint_a.as_ref()], &PROGRAM_ID);
     let (vault_b, _) = Pubkey::find_program_address(&[pool.as_ref(), mint_b.as_ref()], &PROGRAM_ID);
+
 
     // create mints
     create_mint(&mut svm, &payer, &mint_a, 9); // SOL decimals
@@ -59,9 +58,6 @@ fn integration() {
     );
 
     // 1) Initialize pool
-    let pool_rent = svm.minimum_balance_for_rent_exemption(POOL_LEN);
-    let create_pool_ixn = create_account(&payer, &pool, pool_rent, POOL_LEN as u64, &PROGRAM_ID);
-
     let usdc_atoms_per_sol: u64 = 1_000 * 1_000_000; // $1000 per SOL in USDC atoms (6 decimals)
     let mut init_data = vec![0u8]; // discriminator
     init_data.extend_from_slice(&usdc_atoms_per_sol.to_le_bytes());
@@ -81,7 +77,7 @@ fn integration() {
         data: init_data,
     };
 
-    let msg = Message::new(&[create_pool_ixn, init_ixn], Some(&payer));
+    let msg = Message::new(&[init_ixn], Some(&payer));
     let txn = Transaction::new_unsigned(msg);
     let res = svm.send_transaction(txn).unwrap();
 

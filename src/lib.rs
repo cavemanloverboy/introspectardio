@@ -26,9 +26,8 @@ pub struct Pool {
     pub usdc_atoms_per_sol: U128,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
-    // seeds: [pool_key(32), mint_key(32), bump(1)] = 65 bytes
-    pub vault_a_seeds: [u8; 65],
-    pub vault_b_seeds: [u8; 65],
+    // seeds: [mint_a(32), mint_b(32), bump(1)] = 65 bytes
+    pub pool_seeds: [u8; 65],
 }
 
 use uint::construct_uint;
@@ -85,6 +84,12 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
 
     let usdc_atoms_per_sol = unsafe { data.as_ptr().cast::<u64>().read_unaligned() };
 
+    // derive pool PDA
+    let (expected_pool, bump_pool) = find_program_address(&[mint_a.key(), mint_b.key()], &ID);
+    if !pubkey_eq(pool.key(), &expected_pool) {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
     // derive vault PDAs
     let (expected_vault_a, bump_a) = find_program_address(&[pool.key(), mint_a.key()], &ID);
     let (expected_vault_b, bump_b) = find_program_address(&[pool.key(), mint_b.key()], &ID);
@@ -96,21 +101,29 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
         return Err(ProgramError::InvalidSeeds);
     }
 
+    // create pool account
+    let seeds_pool = seeds!(mint_a.key(), mint_b.key(), b(&bump_pool));
+    let signer_pool = Signer::from(&seeds_pool);
+
+    create_account_with_minimum_balance_signed(
+        pool,
+        Pool::LEN,
+        &ID,
+        payer,
+        None,
+        &[signer_pool],
+    )?;
+
     // init pool account
     let mut pool_data = Pool::from_account_mut(pool)?;
     pool_data.usdc_atoms_per_sol = U128::from(usdc_atoms_per_sol);
     pool_data.vault_a = *vault_a.key();
     pool_data.vault_b = *vault_b.key();
 
-    // build vault_a seeds: [pool_key, mint_a_key, bump]
-    pool_data.vault_a_seeds[0..32].copy_from_slice(pool.key());
-    pool_data.vault_a_seeds[32..64].copy_from_slice(mint_a.key());
-    pool_data.vault_a_seeds[64] = bump_a;
-
-    // build vault_b seeds: [pool_key, mint_b_key, bump]
-    pool_data.vault_b_seeds[0..32].copy_from_slice(pool.key());
-    pool_data.vault_b_seeds[32..64].copy_from_slice(mint_b.key());
-    pool_data.vault_b_seeds[64] = bump_b;
+    // build pool seeds: [mint_a_key, mint_b_key, bump]
+    pool_data.pool_seeds[0..32].copy_from_slice(mint_a.key());
+    pool_data.pool_seeds[32..64].copy_from_slice(mint_b.key());
+    pool_data.pool_seeds[64] = bump_pool;
 
     let seeds_a = seeds!(pool.key(), mint_a.key(), b(&bump_a));
     let signer_a = Signer::from(&seeds_a);
@@ -128,11 +141,11 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
         &[signer_a],
     )?;
 
-    // init vault_a (vault owns itself)
+    // init vault_a (pool owns vault)
     pinocchio_token::instructions::InitializeAccount3 {
         account: vault_a,
         mint: mint_a,
-        owner: vault_a.key(),
+        owner: pool.key(),
     }
     .invoke()?;
 
@@ -146,11 +159,11 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
         &[signer_b],
     )?;
 
-    // init vault_b (vault owns itself)
+    // init vault_b (pool owns vault)
     pinocchio_token::instructions::InitializeAccount3 {
         account: vault_b,
         mint: mint_b,
-        owner: vault_b.key(),
+        owner: pool.key(),
     }
     .invoke()?;
 
@@ -199,17 +212,17 @@ fn process_swap(accounts: &[AccountInfo]) -> ProgramResult {
         return Err(IntrospectardioError::LargeOrder)?;
     };
 
-    // Transfer out (vault_b signs for itself)
-    let pool_key = &pool_data.vault_b_seeds[0..32];
-    let mint_key = &pool_data.vault_b_seeds[32..64];
-    let bump = &pool_data.vault_b_seeds[64..65];
-    let seeds = seeds!(pool_key, mint_key, bump);
+    // Transfer out (pool signs for vault_b)
+    let mint_a_key = &pool_data.pool_seeds[0..32];
+    let mint_b_key = &pool_data.pool_seeds[32..64];
+    let bump = &pool_data.pool_seeds[64..65];
+    let seeds = seeds!(mint_a_key, mint_b_key, bump);
     let signer = Signer::from(&seeds);
 
     Transfer {
         from: pool_vault_b,
         to: user_out,
-        authority: pool_vault_b,
+        authority: pool,
         amount: amount_out,
     }
     .invoke_signed(&[signer])?;
