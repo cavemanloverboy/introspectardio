@@ -1,0 +1,20 @@
+[package]
+name = "introspectardio"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+const-crypto = "0.3.0"
+pinocchio = "0.9.2"
+pinocchio-system = "0.4.0"
+pinocchio-token = "0.4.0"
+uint = "0.10.0"
+
+[dev-dependencies]
+litesvm = "0.8.2"
+solana-sdk = "3.0.0"
+solana-sdk-ids = "3.0.0"
+solana-system-interface = { version = "3.0.0", features = ["bincode"] }
