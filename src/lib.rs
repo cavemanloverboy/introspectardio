@@ -4,12 +4,12 @@ use core::array::from_ref as b;
 
 use const_crypto::bs58;
 use pinocchio::{
-    account_info::{AccountInfo, Ref, RefMut},
+    account_info::{AccountInfo, RefMut},
     instruction::Signer,
     program_error::ProgramError,
     pubkey::{find_program_address, pubkey_eq, Pubkey},
     seeds,
-    sysvars::instructions::{Instructions, IntrospectedInstruction},
+    sysvars::instructions::{Instructions, IntrospectedInstruction, INSTRUCTIONS_ID},
     ProgramResult,
 };
 use pinocchio_system::create_account_with_minimum_balance_signed;
@@ -39,12 +39,12 @@ construct_uint! {
 impl Pool {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    pub fn from_account<'a>(account: &'a AccountInfo) -> Result<Ref<'a, Self>, ProgramError> {
-        let data = account.try_borrow_data()?;
+    pub fn from_account<'a>(account: &'a AccountInfo) -> Result<&'a Self, ProgramError> {
+        let data = unsafe { account.borrow_data_unchecked() };
         if data.len() < Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        Ok(Ref::map(data, |d| unsafe { &*d.as_ptr().cast() }))
+        Ok(unsafe { &*data.as_ptr().cast() })
     }
 
     pub fn from_account_mut<'a>(
@@ -72,6 +72,7 @@ pub fn process(_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramRe
     }
 }
 
+#[cold]
 fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let [payer, pool, vault_a, vault_b, mint_a, mint_b, _system_program, _token_program] = accounts
     else {
@@ -105,14 +106,7 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let seeds_pool = seeds!(mint_a.key(), mint_b.key(), b(&bump_pool));
     let signer_pool = Signer::from(&seeds_pool);
 
-    create_account_with_minimum_balance_signed(
-        pool,
-        Pool::LEN,
-        &ID,
-        payer,
-        None,
-        &[signer_pool],
-    )?;
+    create_account_with_minimum_balance_signed(pool, Pool::LEN, &ID, payer, None, &[signer_pool])?;
 
     // init pool account
     let mut pool_data = Pool::from_account_mut(pool)?;
@@ -170,12 +164,22 @@ fn process_init(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     Ok(())
 }
 
+#[inline(always)]
 fn process_swap(accounts: &[AccountInfo]) -> ProgramResult {
-    let [_payer, pool, user_out, pool_vault_a, pool_vault_b, ix_sysvar, _token_program] = accounts
-    else {
+    let [pool, user_out, pool_vault_a, pool_vault_b, ix_sysvar, _token_program] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
+    // Verify ix sysvar
+    if !pubkey_eq(ix_sysvar.key(), &INSTRUCTIONS_ID) {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    // We can implicitly check verify pool is a pda for this program by checking pool is not signer
+    // (the correct pool must sign to get funds out of vaults)
+    if pool.is_signer() {
+        return Err(ProgramError::InvalidArgument);
+    }
     let pool_data = Pool::from_account(pool)?;
 
     // verify vaults match stored keys
@@ -196,7 +200,7 @@ fn process_swap(accounts: &[AccountInfo]) -> ProgramResult {
     let curr_ixn =
         unsafe { instruction_sysvar.deserialize_instruction_unchecked(cur_idx as usize) };
     // not a cpi (or whitelisted caller)
-    if *curr_ixn.get_program_id() != ID {
+    if !pubkey_eq(curr_ixn.get_program_id(), &ID) {
         return Err(ProgramError::IncorrectProgramId);
     }
 
@@ -207,7 +211,7 @@ fn process_swap(accounts: &[AccountInfo]) -> ProgramResult {
     let Some(Ok(amount_out)) = U128::from(amount_in)
         .checked_mul(pool_data.usdc_atoms_per_sol)
         .map(|x| x / 1_000_000_000)
-        .map(|x| x.try_into())
+        .map(TryInto::try_into)
     else {
         return Err(IntrospectardioError::LargeOrder)?;
     };
@@ -252,6 +256,7 @@ impl From<IntrospectardioError> for ProgramError {
 // 4) transfer dest is pool vault
 //
 // If we are executing this code, it's because the instruction succeeded!
+#[inline(always)]
 fn validate_prev_ix(
     prev_ix: IntrospectedInstruction,
     pool_vault_in: AccountInfo,
@@ -278,7 +283,7 @@ fn validate_prev_ix(
     // 4) transfer dest is pool vault
     // SAFETY: transfer succeeded so num accounts is correct
     let dest = unsafe { prev_ix.get_account_meta_at_unchecked(1) };
-    let correct_dest = dest.key.eq(pool_vault_in.key());
+    let correct_dest = pubkey_eq(&dest.key, pool_vault_in.key());
     if !correct_dest {
         return Err(IntrospectardioError::UnexpectedTransferDest.into());
     }

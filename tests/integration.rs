@@ -37,7 +37,6 @@ fn integration() {
     let (vault_a, _) = Pubkey::find_program_address(&[pool.as_ref(), mint_a.as_ref()], &PROGRAM_ID);
     let (vault_b, _) = Pubkey::find_program_address(&[pool.as_ref(), mint_b.as_ref()], &PROGRAM_ID);
 
-
     // create mints
     create_mint(&mut svm, &payer, &mint_a, 9); // SOL decimals
     create_mint(&mut svm, &payer, &mint_b, 6); // USDC decimals
@@ -99,7 +98,6 @@ fn integration() {
     let swap_ixn = Instruction {
         program_id: PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(user, true),
             AccountMeta::new_readonly(pool, false),
             AccountMeta::new(user_ata_b, false), // user_out
             AccountMeta::new(vault_a, false),    // pool_vault_a
